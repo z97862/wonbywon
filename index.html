@@ -151,11 +151,42 @@ function periodOf(t){
 }
 
 /* ================= state ================= */
-const BUCKETS = ['생활비','문화비','품위유지비','경조사비'];
-const BCOL = {'생활비':'#eda100','문화비':'#ff7a3d','품위유지비':'#ff8fb8','경조사비':'#9db6ea'};
+let BUCKETS = [];
+let BCOL = {};
+const PALETTE = ['#eda100','#ff7a3d','#ff8fb8','#9db6ea','#1baf7a','#8f8e88','#2a78d6','#c6e84a'];
+function syncBuckets(){
+  const st=state.settings; if(!st.bucketOrder) st.bucketOrder=Object.keys(st.budgets||{});
+  st.bucketOrder=st.bucketOrder.filter(b=>b in st.budgets);
+  Object.keys(st.budgets).forEach(b=>{ if(!st.bucketOrder.includes(b)) st.bucketOrder.push(b); });
+  BUCKETS=st.bucketOrder.slice(); BCOL={}; BUCKETS.forEach((b,i)=>BCOL[b]=PALETTE[i%PALETTE.length]);
+}
+const V2_BUDGETS = {'식비':400000,'생활비':100000,'경조사':100000,'문화생활':150000,'미용/의류':200000,'통신·보험·미정':100000};
+const V2_SUBCATS = [['식사','식비'],['카페/간식','식비'],['배달','식비'],['장보기','식비'],['생필품','생활비'],['생활 기타','생활비'],['생일·선물','경조사'],['축의/부의','경조사'],['취미(기타·밴드)','문화생활'],['공연/영화','문화생활'],['놀거리','문화생활'],['옷','미용/의류'],['미용실','미용/의류'],['화장품','미용/의류'],['통신비','통신·보험·미정'],['보험','통신·보험·미정'],['미정','통신·보험·미정']];
+function migrate(){
+  if(!state.settings) return;
+  if((state.v||1)<2){
+    const st=state.settings; st.budgets={...V2_BUDGETS}; st.bucketOrder=Object.keys(V2_BUDGETS);
+    const rename={'장보기/생필품':'생필품','구독':'미정'};
+    (state.entries||[]).forEach(e=>{ if(e.sub&&rename[e.sub]) e.sub=rename[e.sub]; });
+    Object.keys(state.learned||{}).forEach(k=>{ if(rename[state.learned[k]]) state.learned[k]=rename[state.learned[k]]; });
+    const OLD=['식사','카페/간식','배달','장보기/생필품','취미(기타·밴드)','공연/영화','구독','놀거리','옷','미용실','화장품','생일·선물','축의/부의'];
+    const extra=(state.subcats||[]).filter(c=>!OLD.includes(c.name)&&!V2_SUBCATS.some(([n])=>n===c.name));
+    state.subcats=V2_SUBCATS.map(([name,bucket])=>({name,bucket}));
+    extra.forEach(c=>{ if(!state.subcats.some(x=>x.name===c.name)) state.subcats.push({name:c.name,bucket:'통신·보험·미정'}); });
+    const byName=n=>(state.fixed||[]).find(f=>f.name===n);
+    const rent=byName('월세·공과금'), bus=byName('교통비'), etc=byName('기타 고정');
+    state.fixed=[{id:rent?rent.id:uid(),name:'월세·공과금',amount:400000,day:23},{id:bus?bus.id:uid(),name:'교통비',amount:100000,day:null},{id:etc?etc.id:uid(),name:'기타(구독료 등)',amount:50000,day:null}];
+    const amt={'청약통장':250000,'생활파킹통장':500000,'ISA':300000,'연금저축':150000};
+    (state.plan||[]).forEach(p=>{ const a=(state.accounts||[]).find(x=>x.id===p.to); if(a&&amt[a.name]!=null) p.amount=amt[a.name]; });
+    state.v=2;
+    return true;
+  }
+  return false;
+}
 const PCOL = {live:'#eda100',emg:'#1baf7a',save:'#2a78d6',inv:'#eb6834'};
 const PNAME = {live:'생활비',emg:'비상금',save:'저축',inv:'투자'};
-function defaults(){
+function defaults(){ const d=defaultsV1(); state=d; migrate(); return state; }
+function defaultsV1(){
   const acc = (name,purpose) => ({id:uid(),name,purpose,start:0});
   const a = [acc('생활비 통장','live'),acc('생활파킹통장','emg'),acc('청약통장','save'),acc('마이홈 적금','save'),acc('ISA','inv'),acc('연금저축','inv'),acc('CMA','inv')];
   const byName = n => a.find(x=>x.name===n).id;
@@ -178,7 +209,7 @@ function defaults(){
 let state = null, store = null, sample = null;
 
 /* ================= derived ================= */
-const subBucket = name => (state.subcats.find(s=>s.name===name)||{}).bucket || '생활비';
+const subBucket = name => (state.subcats.find(s=>s.name===name)||{}).bucket || BUCKETS[BUCKETS.length-1] || '미정';
 const accName = id => id==='ext' ? '월급·외부' : id==='fixed' ? '고정지출' : ((state.accounts.find(a=>a.id===id)||{}).name || '(삭제됨)');
 const liveAcc = () => (state.accounts.find(a=>a.purpose==='live')||state.accounts[0]||{}).id;
 function balances(){
@@ -203,7 +234,7 @@ function calc(){
   const left = limit-spentToday;
   const base = budget/P.days;
   const byBucket={}, bySub={};
-  spends.forEach(e=>{ const b=e.bucket||subBucket(e.sub); byBucket[b]=(byBucket[b]||0)+e.amount; bySub[e.sub]=(bySub[e.sub]||0)+e.amount; });
+  spends.forEach(e=>{ const b=subBucket(e.sub); byBucket[b]=(byBucket[b]||0)+e.amount; bySub[e.sub]=(bySub[e.sub]||0)+e.amount; });
   return {adj,t,T,P,budget,spent,spentToday,remDays,limit,left,base,byBucket,bySub,spends,elapsed:(dayDiff(P.start,t)+1)/P.days};
 }
 
@@ -216,6 +247,7 @@ function buddy(svg, text, tape, flip){
   return `<div class="buddy" style="${flip?'flex-direction:row-reverse':''}">${svg}<div class="note" style="--tape:${tape};transform:rotate(${flip?2:-2}deg)">${text}</div></div>`;
 }
 function render(){
+  syncBuckets();
   document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-selected', b.dataset.v===view));
   const c=calc();
   $('#view').innerHTML = view==='today'?vToday(c): view==='money'?vMoney(c): view==='pay'?vPay(c): vCal(c);
@@ -250,7 +282,7 @@ function vToday(c){
   + win('오늘쓴돈.log','orange',`<div class="in list" style="margin:4px;padding:2px 8px">${todays.length?todays.map(itemRow).join(''):'<div class="small muted" style="padding:10px 0">아직 기록이 없어요. 오른쪽 아래 새기록.exe를 눌러 보세요.</div>'}</div>`);
 }
 function itemRow(e){
-  const b = e.type==='spend' ? (e.bucket||subBucket(e.sub)) : null;
+  const b = e.type==='spend' ? subBucket(e.sub) : null;
   const label = e.type==='spend' ? `${esc(e.memo||e.sub)}<span class="tiny muted" style="display:block">${esc(e.sub)} · ${b}</span>` :
      e.type==='move' ? `${esc(accName(e.from))} → ${esc(accName(e.to))}<span class="tiny muted" style="display:block">${esc(e.memo||'이체')}</span>` :
      `${esc(e.memo||'고정지출')}<span class="tiny muted" style="display:block">고정지출</span>`;
@@ -349,10 +381,12 @@ const RULES = [
  ['식사',['점심','저녁','아침','밥','식당','김밥','국밥','라면','분식','한식','중식','일식','짜장','짬뽕','돈까스','버거','맥도날드','롯데리아','버거킹','서브웨이','덮밥','샐러드','회사밥','학식','백반']],
  ['카페/간식',['커피','카페','스벅','스타벅스','메가','컴포즈','이디야','빽다방','투썸','아아','라떼','빵','베이커리','디저트','편의점','cu','gs25','gs','세븐','아이스크림','간식','과자','음료']],
  ['배달',['배민','배달','쿠팡이츠','요기요','치킨','피자']],
- ['장보기/생필품',['쿠팡','다이소','마트','이마트','홈플러스','장보기','생필품','세제','휴지','샴푸','컬리','물티슈']],
+ ['장보기',['마트','이마트','홈플러스','장보기','컬리','식재료','정육','과일']],
+ ['생필품',['쿠팡','다이소','생필품','세제','휴지','샴푸','물티슈','치약','올리브영 생필']],
+ ['통신비',['통신','핸드폰','휴대폰','요금','skt','kt','lg u+','유플러스','알뜰폰']],
+ ['보험',['보험','실비']],
  ['취미(기타·밴드)',['합주','합주실','기타줄','줄','피크','이펙터','앰프','악기','스트링','레슨','카포']],
  ['공연/영화',['영화','cgv','메가박스','롯데시네마','공연','콘서트','전시','티켓','뮤지컬','페스티벌']],
- ['구독',['넷플릭스','유튜브','스포티파이','멜론','구독','티빙','왓챠','쿠팡플레이','디즈니','애플뮤직','지니']],
  ['놀거리',['노래방','코인노래방','pc방','피시방','볼링','술','맥주','소주','포차','이자카야','방탈출','오락실','당구']],
  ['옷',['옷','니트','무신사','바지','셔츠','신발','자라','유니클로','후드','자켓','코트','양말','29cm','에이블리']],
  ['미용실',['미용실','헤어','커트','컷','펌','염색','바버','이발']],
@@ -522,10 +556,13 @@ function openAccount(id){
   const del=$('#adel'); if(del) del.onclick=()=>{ if(!del.dataset.arm){del.dataset.arm=1;del.textContent='정말 삭제?';return;} state.accounts=state.accounts.filter(x=>x.id!==id); state.plan=state.plan.filter(p=>p.to!==id); persist(); closeDlg(); render(); };
 }
 function openSettings(){
+  syncBuckets();
   const s=state.settings;
   const row=(lbl,key,val,extra='')=>`<div class="row small" style="margin-top:6px"><label for="${key}" style="flex:1">${lbl}</label><input id="${key}" class="in pix" style="width:130px;font-size:20px;text-align:right;padding:2px 6px" inputmode="numeric" value="${won(val)}" ${extra}></div>`;
   openDlg(dlgWin('예산 설정',`<div class="panel">
-    <fieldset style="margin-top:0"><legend>지출 예산 (하루 여유 계산 기준)</legend>${BUCKETS.map((b,i)=>row(b,'b'+i,s.budgets[b])).join('')}<div class="tiny muted" style="margin-top:6px" id="dailyHint"></div></fieldset>
+    <fieldset style="margin-top:0"><legend>지출 예산 (하루 여유 계산 기준)</legend>${BUCKETS.map((b,i)=>row(esc(b),'b'+i,s.budgets[b])).join('')}
+      <div class="row small" style="margin-top:8px;gap:4px"><input id="nbName" class="in" style="flex:1;padding:4px" placeholder="새 예산 칸 이름"><button type="button" class="btn sm" id="nbAdd">+ 칸 추가</button></div>
+      <div class="chips" style="margin-top:6px">${BUCKETS.map((b,i)=>`<button type="button" class="chip" data-delbk="${i}">${esc(b)} ×</button>`).join('')}</div><div class="tiny muted" style="margin-top:6px" id="dailyHint"></div></fieldset>
     <fieldset><legend>고정지출</legend>${state.fixed.map((f,i)=>row(esc(f.name)+(f.day?` (매월 ${f.day}일)`:''),'f'+i,f.amount)).join('')}</fieldset>
     <fieldset><legend>월급날 옮길 돈</legend>${state.plan.map((p,i)=>row(esc(accName(p.to)),'p'+i,p.amount)).join('')}
       <div class="row small" style="margin-top:8px"><select id="npTo" class="in" style="flex:1;padding:4px">${state.accounts.filter(a=>a.purpose!=='live'&&!state.plan.some(p=>p.to===a.id)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><button type="button" class="btn sm" id="npAdd">+ 추가</button></div></fieldset>
@@ -539,9 +576,11 @@ function openSettings(){
   document.querySelectorAll('#dlg input.pix').forEach(i=>i.addEventListener('input',()=>{ if(i.id==='pd') return; const v=+i.value.replace(/[^0-9]/g,'')||0; i.value=v?won(v):''; hint(); }));
   hint();
   document.querySelectorAll('[data-delsub]').forEach(b=>b.onclick=()=>{ if(!b.dataset.arm){b.dataset.arm=1;b.textContent='삭제?';return;} state.subcats.splice(+b.dataset.delsub,1); persist(); openSettings(); });
+  $('#nbAdd').onclick=()=>{ const n=$('#nbName').value.trim().slice(0,12); if(!n||BUCKETS.includes(n)){ toast('이름을 확인해 주세요'); return; } BUCKETS.forEach((b,i)=>s.budgets[b]=num('b'+i)); s.budgets[n]=0; s.bucketOrder.push(n); persist(); openSettings(); };
+  document.querySelectorAll('[data-delbk]').forEach(b=>b.onclick=()=>{ const name=BUCKETS[+b.dataset.delbk]; if(state.subcats.some(c=>c.bucket===name)){ if(!b.dataset.arm){ b.dataset.arm=1; b.textContent='세부분류도 옮겨져요. 삭제?'; return; } } if(BUCKETS.length<=1) return; const to=BUCKETS.find(x=>x!==name); state.subcats.forEach(c=>{ if(c.bucket===name) c.bucket=to; }); delete s.budgets[name]; s.bucketOrder=s.bucketOrder.filter(x=>x!==name); persist(); openSettings(); });
   $('#npAdd').onclick=()=>{ const v=$('#npTo').value; if(!v) return; state.plan.push({id:uid(),to:v,amount:0}); persist(); openSettings(); };
   $('#bkCopy').onclick=async()=>{ try{ await navigator.clipboard.writeText(JSON.stringify(state)); toast('백업을 복사했어요'); }catch(e){ const t=$('#bkText'); t.hidden=false; t.value=JSON.stringify(state); t.select(); toast('복사가 막혀서 아래 텍스트를 직접 복사해 주세요'); } };
-  $('#bkRestore').onclick=()=>{ const t=$('#bkText'); if(t.hidden||!t.value.trim()){ t.hidden=false; t.value=''; t.focus(); return; } try{ const o=JSON.parse(t.value); if(!o.accounts||!o.entries) throw 0; state=o; persist(); closeDlg(); render(); toast('복원했어요'); }catch(e){ toast('백업 형식이 아니에요'); } };
+  $('#bkRestore').onclick=()=>{ const t=$('#bkText'); if(t.hidden||!t.value.trim()){ t.hidden=false; t.value=''; t.focus(); return; } try{ const o=JSON.parse(t.value); if(!o.accounts||!o.entries) throw 0; state=o; migrate(); persist(); closeDlg(); render(); toast('복원했어요'); }catch(e){ toast('백업 형식이 아니에요'); } };
   $('#lgOut').onclick=()=>{ closeDlg(); window.__logout(); };
   $('#sok').onclick=()=>{
     BUCKETS.forEach((b,i)=>s.budgets[b]=num('b'+i));
@@ -583,6 +622,7 @@ function loginBox(msg){
 async function init(){
   const v=location.hash.slice(1); if(['today','money','pay','cal'].includes(v)) view=v;
   try{ const l=JSON.parse(localStorage.getItem(LS)||'null'); state=(l&&l.accounts)?l:defaults(); }catch(e){ state=defaults(); }
+  migrate();
   render();
   try{ await setPersistence(auth, browserLocalPersistence); }catch(e){}
   onAuthStateChanged(auth, async u=>{
@@ -592,8 +632,9 @@ async function init(){
     try{
       const snap=await getDoc(ref);
       if(snap.exists()&&snap.data().accounts) state=snap.data();
+      const mig=migrate();
       store={label:'☁ 내 계정에 저장됨', save:o=>{ try{localStorage.setItem(LS,JSON.stringify(o));}catch(e){} return setDoc(ref,o); }};
-      $('#status').textContent=store.label; render(); if(!snap.exists()) persist();
+      $('#status').textContent=store.label; render(); if(!snap.exists()||mig) persist(); if(mig) toast('새 예산 구조(식비·생활비·경조사·문화생활·미용/의류·미정)로 바꿨어요');
     }catch(e){ console.error(e); $('#status').textContent='불러오기 실패 — 인터넷 연결을 확인해 주세요'; }
   });
 }
