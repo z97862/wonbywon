@@ -185,11 +185,27 @@ function migrate(){
     const st=state.settings;
     state.fixed=(state.fixed||[]).filter(f=>f.name!=='교통비');
     if(!('교통' in st.budgets)){ st.budgets['교통']=100000; st.bucketOrder=(st.bucketOrder||Object.keys(st.budgets)).filter(b=>b!=='교통'); const i=st.bucketOrder.indexOf('생활비'); st.bucketOrder.splice(i>=0?i+1:st.bucketOrder.length,0,'교통'); }
-    ['교통 충전','택시'].forEach(n=>{ if(!state.subcats.some(c=>c.name===n)) state.subcats.push({name:n,bucket:'교통'}); });
+    ['월세',['월세','집세','임대료']],
+ ['공과금',['관리비','전기','가스','수도','공과금','도시가스']],
+ ['구독',['넷플릭스','유튜브','스포티파이','멜론','구독','티빙','왓챠','쿠팡플레이','디즈니','애플뮤직','지니','icloud','아이클라우드']],
+ ['교통 충전','택시'].forEach(n=>{ if(!state.subcats.some(c=>c.name===n)) state.subcats.push({name:n,bucket:'교통'}); });
     state.v=3;
-    return true;
   }
-  return false;
+  if(state.v===3){
+    const st=state.settings;
+    st.budgets['월세·공과금']=st.budgets['월세·공과금']??400000;
+    st.budgets['구독']=st.budgets['구독']??50000;
+    st.regular=['월세·공과금','교통','구독'];
+    st.dueDays={'월세·공과금':23};
+    st.bucketOrder=['월세·공과금','교통','구독',...(st.bucketOrder||[]).filter(b=>!['월세·공과금','교통','구독'].includes(b))];
+    [['월세','월세·공과금'],['공과금','월세·공과금'],['구독','구독']].forEach(([n,b])=>{ const c=state.subcats.find(x=>x.name===n); if(c) c.bucket=b; else state.subcats.push({name:n,bucket:b}); });
+    const fmap={'월세·공과금':'월세','교통비':'교통 충전','기타(구독료 등)':'구독','기타 고정':'구독','공동생활비':'미정'};
+    const fname=id=>((state.fixed||[]).find(f=>f.id===id)||{}).name;
+    (state.entries||[]).forEach(e=>{ if(e.type==='fixed'){ e.type='spend'; e.sub=fmap[fname(e.fixedId)||e.memo]||'미정'; delete e.fixedId; } });
+    state.fixed=[];
+    state.v=4;
+  }
+  return (state.v!==startV);
 }
 const PCOL = {live:'#eda100',emg:'#1baf7a',save:'#2a78d6',inv:'#eb6834'};
 const PNAME = {live:'생활비',emg:'비상금',save:'저축',inv:'투자'};
@@ -231,11 +247,16 @@ function balances(){
 function inPeriod(e,P){ const d=parseD(e.date); return dayDiff(P.start,d)>=0 && dayDiff(d,P.end)>=0; }
 function calc(){
   const t=new Date(), T=fmt(t), P=periodOf(t);
-  const budget = BUCKETS.reduce((s,b)=>s+(+state.settings.budgets[b]||0),0);
+  const reg = state.settings.regular||[], bud=b=>(+state.settings.budgets[b]||0);
+  const flexB = BUCKETS.filter(b=>!reg.includes(b)), regB = BUCKETS.filter(b=>reg.includes(b));
+  const budget = flexB.reduce((s,b)=>s+bud(b),0), regBudget = regB.reduce((s,b)=>s+bud(b),0);
   const spends = state.entries.filter(e=>e.type==='spend' && inPeriod(e,P));
+  const flexSpends = spends.filter(e=>!reg.includes(subBucket(e.sub)));
+  const regSpent={}; spends.forEach(e=>{ const b=subBucket(e.sub); if(reg.includes(b)) regSpent[b]=(regSpent[b]||0)+e.amount; });
+  const overrun = regB.reduce((s,b)=>s+Math.max(0,(regSpent[b]||0)-bud(b)),0);
   const adj = (state.adjust||[]).filter(a=>a.start===fmt(P.start)).reduce((s,a)=>s+(+a.spent||0),0);
-  const spentBefore = adj + spends.filter(e=>e.date<T).reduce((s,e)=>s+e.amount,0);
-  const spentToday = spends.filter(e=>e.date===T).reduce((s,e)=>s+e.amount,0);
+  const spentBefore = adj + overrun + flexSpends.filter(e=>e.date<T).reduce((s,e)=>s+e.amount,0);
+  const spentToday = flexSpends.filter(e=>e.date===T).reduce((s,e)=>s+e.amount,0);
   const spent = spentBefore+spentToday;
   const remDays = dayDiff(t,P.end)+1;
   const limit = Math.max(0,(budget-spentBefore)/remDays);
@@ -243,7 +264,7 @@ function calc(){
   const base = budget/P.days;
   const byBucket={}, bySub={};
   spends.forEach(e=>{ const b=subBucket(e.sub); byBucket[b]=(byBucket[b]||0)+e.amount; bySub[e.sub]=(bySub[e.sub]||0)+e.amount; });
-  return {adj,t,T,P,budget,spent,spentToday,remDays,limit,left,base,byBucket,bySub,spends,elapsed:(dayDiff(P.start,t)+1)/P.days};
+  return {flexB,regB,regBudget,regSpent,overrun,flexSpends,adj,t,T,P,budget,spent,spentToday,remDays,limit,left,base,byBucket,bySub,spends,elapsed:(dayDiff(P.start,t)+1)/P.days};
 }
 
 /* ================= render ================= */
@@ -271,7 +292,7 @@ function vToday(c){
   const catSvg = mood==='sad'?MASCOT.catSad: mood==='worried'?MASCOT.catCareful:MASCOT.catHappy;
   const pct = Math.min(100, c.spent/c.budget*100);
   const diff = c.limit-c.base;
-  const buckets = BUCKETS.map(b=>{ const bud=+state.settings.budgets[b]||0, sp=c.byBucket[b]||0, p=bud?Math.min(100,sp/bud*100):0, over=sp>bud;
+  const buckets = c.flexB.map(b=>{ const bud=+state.settings.budgets[b]||0, sp=c.byBucket[b]||0, p=bud?Math.min(100,sp/bud*100):0, over=sp>bud;
     return `<div style="margin-bottom:10px"><div class="row small" style="margin-bottom:3px"><span>${b}</span><span class="pix" style="font-size:18px">${over?'<span class="warn">'+man(sp-bud)+' 초과</span>':man(bud-sp)+' 남음'} / ${man(bud)}</span></div><div class="seg" style="height:14px"><i style="width:${p}%;background:repeating-linear-gradient(90deg,${over||p>c.elapsed*100+15?'#e0245e':'#1f1fa0'} 0 7px,transparent 7px 9px)"></i></div></div>`; }).join('');
   const todays = c.spends.filter(e=>e.date===c.T);
   return win('오늘의여유.exe','lime',`<div class="body">
@@ -286,7 +307,7 @@ function vToday(c){
       <div class="hand" style="font-size:15px;color:#c0144c;margin-top:4px;padding-left:calc(${Math.min(88,c.elapsed*100)}% - 8px)">↑ 오늘 기준선</div>
     </div>`,['파일','편집','보기','도움말'])
   + buddy(catSvg, msg, '#9fd8ff')
-  + win('남은돈.txt - 메모장','sky',`<div class="in" style="margin:0 4px 4px;padding:10px 10px 4px">${buckets}${c.adj?`<div class="tiny muted" style="border-top:1px dashed #808080;padding:6px 0">앱 쓰기 전 지출 ${man(c.adj)}은 분류 없이 합계에만 들어가 있어요</div>`:''}</div>`,['파일','편집','서식'])
+  + win('남은돈.txt - 메모장','sky',`<div class="in" style="margin:0 4px 4px;padding:10px 10px 4px">${buckets}${c.regB.length?`<div style="border-top:1px dashed #808080;padding:6px 0 2px"><div class="tiny muted" style="margin-bottom:4px">정기 지출 (미리 빼 둔 돈 ${man(c.regBudget)})</div>${c.regB.map(b=>{const bd=+state.settings.budgets[b]||0, sp=c.regSpent[b]||0; return `<div class="row small" style="padding:2px 0"><span>${esc(b)}${(state.settings.dueDays||{})[b]?' · '+state.settings.dueDays[b]+'일':''}</span><span class="pix" style="font-size:17px;${sp>bd?'color:#a3103e':''}">${man(sp)} / ${man(bd)}${sp>bd?' ▲':''}</span></div>`;}).join('')}${c.overrun?`<div class="tiny warn">정기 지출 초과분 ${man(c.overrun)}은 하루 여유에서 빠졌어요</div>`:''}</div>`:''}${c.adj?`<div class="tiny muted" style="border-top:1px dashed #808080;padding:6px 0">앱 쓰기 전 지출 ${man(c.adj)}은 분류 없이 합계에만 들어가 있어요</div>`:''}</div>`,['파일','편집','서식'])
   + win('오늘쓴돈.log','orange',`<div class="in list" style="margin:4px;padding:2px 8px">${todays.length?todays.map(itemRow).join(''):'<div class="small muted" style="padding:10px 0">아직 기록이 없어요. 오른쪽 아래 새기록.exe를 눌러 보세요.</div>'}</div>`);
 }
 function itemRow(e){
@@ -321,28 +342,28 @@ function vMoney(c){
   + buddy(MASCOT.starGuitar, msg, '#ffe14d', true);
 }
 function vPay(c){
-  const P=c.P; const moves=state.entries.filter(e=>e.type==='move'&&inPeriod(e,P)); const fixedPaid=state.entries.filter(e=>e.type==='fixed'&&inPeriod(e,P));
+  const P=c.P; const moves=state.entries.filter(e=>e.type==='move'&&inPeriod(e,P));
   const skip=(state.skip||{})[fmt(P.start)]||[];
   const items = state.plan.map(p=>{ const got=moves.filter(m=>m.to===p.to).reduce((s,m)=>s+m.amount,0); const sk=skip.includes(p.id); return {...p, got, sk, done:sk||got>=p.amount}; });
-  const fx = state.fixed.map(f=>{ const paid=fixedPaid.filter(e=>e.fixedId===f.id).reduce((s,e)=>s+e.amount,0); const sk=skip.includes(f.id); return {...f,paid,sk,done:sk||paid>0}; });
-  const done = items.filter(i=>i.done).length+fx.filter(f=>f.done).length, n=items.length+fx.length;
-  const fixedT=state.fixed.reduce((s,f)=>s+f.amount,0), planT=state.plan.reduce((s,p)=>s+p.amount,0);
+  const due=state.settings.dueDays||{};
+  const regs = c.regB.map(b=>{ const bd=+state.settings.budgets[b]||0, paid=c.regSpent[b]||0; return {b,bd,paid,done: due[b]? paid>0 : paid>=bd}; });
+  const done = items.filter(i=>i.done).length+regs.filter(r=>r.done).length, n=items.length+regs.length;
+  const planT=state.plan.reduce((s,p)=>s+p.amount,0);
   const saveT=state.plan.filter(p=>{const a=state.accounts.find(x=>x.id===p.to);return a&&a.purpose!=='inv';}).reduce((s,p)=>s+p.amount,0);
-  const invT=planT-saveT, salary=fixedT+c.budget+planT;
-  const rent = state.fixed.find(f=>f.day); 
-  let rentLine='';
-  if (rent){ let rd=new Date(c.t.getFullYear(),c.t.getMonth(),rent.day); if(dayDiff(c.t,rd)<0) rd=new Date(c.t.getFullYear(),c.t.getMonth()+1,rent.day); rentLine=`<div class="row small" style="margin-top:4px"><span>${esc(rent.name)} 납부</span><span>${md(rd)} · D-${dayDiff(c.t,rd)}</span></div>`; }
+  const invT=planT-saveT, salary=c.regBudget+c.budget+planT;
+  const dueLines = Object.entries(due).filter(([b])=>c.regB.includes(b)).map(([b,day])=>{ let rd=new Date(c.t.getFullYear(),c.t.getMonth(),day); if(dayDiff(c.t,rd)<0) rd=new Date(c.t.getFullYear(),c.t.getMonth()+1,day); return `<div class="row small" style="margin-top:4px"><span>${esc(b)} 납부</span><span>${md(rd)} · D-${dayDiff(c.t,rd)}</span></div>`; }).join('');
   const msg = done===n ? '이번 달 분배 끝!<br>반짝반짝 최고야 ☆' : `${done}/${n} 챙겼어!<br>남은 것도 같이 옮기자 ♪`;
+  const lbl=(t,v)=>`<span>${t} <b class="pix" style="font-size:17px;font-weight:400">${man(v)}</b></span>`;
   return win('월급 분배 마법사','orange',`<div class="body">
       <div class="small">이번 주기 ${md(P.start)} ~ ${md(P.end)}</div>
-      <div class="row small" style="margin-top:4px"><span>다음 월급</span><span>${md(P.next)} · D-${dayDiff(c.t,P.next)}</span></div>${rentLine}
+      <div class="row small" style="margin-top:4px"><span>다음 월급</span><span>${md(P.next)} · D-${dayDiff(c.t,P.next)}</span></div>${dueLines}
       <div class="row" style="margin-top:10px"><span class="small">월 배분 합계</span><span class="pix" style="font-size:26px">${won(salary)}원</span></div>
-      <div style="display:flex;gap:2px;height:18px;margin-top:6px;border:1px solid #222;padding:1px;background:#fff"><i style="flex:${fixedT};background:#8f8e88"></i><i style="flex:${c.budget};background:#eda100"></i><i style="flex:${saveT||0.0001};background:#2a78d6"></i><i style="flex:${invT||0.0001};background:#eb6834"></i></div>
-      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin-top:4px" class="tiny"><span>고정 <b class="pix" style="font-size:17px;font-weight:400">${man(fixedT)}</b></span><span>지출 <b class="pix" style="font-size:17px;font-weight:400">${man(c.budget)}</b></span><span>예적금 <b class="pix" style="font-size:17px;font-weight:400">${man(saveT)}</b></span><span>투자 <b class="pix" style="font-size:17px;font-weight:400">${man(invT)}</b></span></div>
+      <div style="display:flex;gap:2px;height:18px;margin-top:6px;border:1px solid #222;padding:1px;background:#fff"><i style="flex:${c.regBudget||0.0001};background:#8f8e88"></i><i style="flex:${c.budget||0.0001};background:#eda100"></i><i style="flex:${saveT||0.0001};background:#2a78d6"></i><i style="flex:${invT||0.0001};background:#eb6834"></i></div>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin-top:4px" class="tiny">${lbl('정기',c.regBudget)}${lbl('지출',c.budget)}${lbl('예적금',saveT)}${lbl('투자',invT)}</div>
       <div class="row small" style="margin-top:12px"><span>옮길 돈 · 낼 돈</span><span>${done} / ${n} 완료</span></div>
       <div class="in list" style="margin-top:4px;padding:2px 8px">
         ${items.map(i=>{const a=state.accounts.find(x=>x.id===i.to)||{purpose:'save'}; return `<div class="it" style="cursor:default"><span aria-hidden="true">${i.done?'☑':'☐'}</span><span class="dot" style="background:${PCOL[a.purpose]}"></span><span style="flex:1">${esc(accName(i.to))}<span class="tiny muted" style="display:block">${i.sk?'이번 달은 생략':i.done?'완료':i.got?man(i.got)+' 옮김':'이체 기록하면 자동 체크'}</span></span><span class="pix" style="font-size:20px">${man(i.amount)}</span>${i.done?'':`<button type="button" class="btn sm" data-planmove="${i.id}">이체</button>`}</div>`;}).join('')}
-        ${fx.map(f=>`<div class="it" style="cursor:default"><span aria-hidden="true">${f.done?'☑':'☐'}</span><span class="dot" style="background:#8f8e88"></span><span style="flex:1">${esc(f.name)}<span class="tiny muted" style="display:block">${f.sk?'이번 달은 처리됨':f.paid?man(f.paid)+' 냄':'고정'}${f.day?' · 매월 '+f.day+'일':''}</span></span><span class="pix" style="font-size:20px">${man(f.amount)}</span>${f.done?'':`<button type="button" class="btn sm" data-payfixed="${f.id}">냈어요</button>`}</div>`).join('')}
+        ${regs.map(r=>`<div class="it" style="cursor:default"><span aria-hidden="true">${r.done?'☑':'☐'}</span><span class="dot" style="background:${BCOL[r.b]}"></span><span style="flex:1">${esc(r.b)}<span class="tiny muted" style="display:block">정기 지출${due[r.b]?' · 매월 '+due[r.b]+'일':''} · ${r.paid?man(r.paid)+' 씀':'아직 기록 없음'}</span></span><span class="pix" style="font-size:20px">${man(r.bd)}</span><button type="button" class="btn sm" data-payreg="${esc(r.b)}">기록</button></div>`).join('')}
       </div>
       <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:10px"><button type="button" class="btn" id="setBtn">예산 설정…</button></div>
     </div>`)
@@ -351,7 +372,7 @@ function vPay(c){
 function vCal(c){
   const P=c.P, days=[]; const lead=P.start.getDay();
   for(let i=0;i<lead;i++) days.push('<span></span>');
-  const per={}; c.spends.forEach(e=>per[e.date]=(per[e.date]||0)+e.amount);
+  const per={}; c.flexSpends.forEach(e=>per[e.date]=(per[e.date]||0)+e.amount);
   if(!calSel) calSel=c.T;
   for(let d=new Date(P.start); dayDiff(d,P.end)>=0; d=addDays(d,1)){
     const k=fmt(d), v=per[k]||0, past=k<=c.T, over=v>c.base;
@@ -378,7 +399,7 @@ function bindView(){
   document.querySelectorAll('[data-acc]').forEach(b=>b.onclick=()=>openAccount(b.dataset.acc));
   document.querySelectorAll('[data-day]').forEach(b=>b.onclick=()=>{calSel=b.dataset.day; render();});
   document.querySelectorAll('[data-planmove]').forEach(b=>b.onclick=()=>{ const p=state.plan.find(x=>x.id===b.dataset.planmove); openEntry(null,'move',{amount:p.amount,from:liveAcc(),to:p.to}); });
-  document.querySelectorAll('[data-payfixed]').forEach(b=>b.onclick=()=>{ const f=state.fixed.find(x=>x.id===b.dataset.payfixed); openEntry(null,'fixed',{amount:f.amount,memo:f.name,fixedId:f.id,from:liveAcc()}); });
+  document.querySelectorAll('[data-payreg]').forEach(b=>b.onclick=()=>{ const bk=b.dataset.payreg, c=calc(); const bd=+state.settings.budgets[bk]||0, paid=c.regSpent[bk]||0; const sub=(state.subcats.find(x=>x.bucket===bk)||{}).name||''; openEntry(null,'spend',{sub, memo:bk.split('·')[0], amount:Math.max(0,bd-paid)}); });
   const a=$('#addAcc'); if(a) a.onclick=()=>openAccount(null);
   const g=$('#goalBtn'); if(g) g.onclick=openSettings;
   const s=$('#setBtn'); if(s) s.onclick=openSettings;
@@ -458,7 +479,7 @@ function openEntry(entry, mode, preset){
       const c=calc(); const newLeft = c.left - (ed&&ed.date===c.T? -ed.amount : 0) - (d.date===c.T? d.amount:0);
       const b=subBucket(d.sub);
       body = `<label class="lb" for="qtext">뭐에 얼마 썼어? <span class="tiny muted">예: 스벅 6500 · 합주실 1.5만</span></label>
-        <input id="qtext" class="in field" autocomplete="off" value="${esc(ed? (d.memo+' '+d.amount):'')}" placeholder="점심 9500">
+        <input id="qtext" class="in field" autocomplete="off" value="${esc((ed||d.memo)? (d.memo+' '+(d.amount||'')).trim():'')}" placeholder="점심 9500">
         <div class="in" style="display:flex;align-items:baseline;justify-content:flex-end;gap:4px;padding:2px 10px;margin-top:6px"><span class="pix" style="font-size:40px;line-height:1">${won(d.amount)}</span><span class="small">원</span></div>
         <label class="lb" for="fsub">분류 <span class="tiny muted" id="srcl">${aiPending?'Claude가 분류하는 중…':srcLabel?'('+srcLabel+'로 자동 분류)':''}</span></label>
         <div style="display:flex;gap:4px"><select id="fsub" class="in field" style="flex:1">${d.sub?'':'<option value="">— 골라주세요 —</option>'}${subOptions(d.sub)}</select>${sample?'<button type="button" class="btn sm" id="aiBtn">자동분류</button>':''}</div>
@@ -573,7 +594,9 @@ function openSettings(){
     <fieldset style="margin-top:0"><legend>지출 예산 (하루 여유 계산 기준)</legend>${BUCKETS.map((b,i)=>row(esc(b),'b'+i,s.budgets[b])).join('')}
       <div class="row small" style="margin-top:8px;gap:4px"><input id="nbName" class="in" style="flex:1;padding:4px" placeholder="새 예산 칸 이름"><button type="button" class="btn sm" id="nbAdd">+ 칸 추가</button></div>
       <div class="chips" style="margin-top:6px">${BUCKETS.map((b,i)=>`<button type="button" class="chip" data-delbk="${i}">${esc(b)} ×</button>`).join('')}</div><div class="tiny muted" style="margin-top:6px" id="dailyHint"></div></fieldset>
-    <fieldset><legend>고정지출</legend>${state.fixed.map((f,i)=>row(esc(f.name)+(f.day?` (매월 ${f.day}일)`:''),'f'+i,f.amount)).join('')}</fieldset>
+    <fieldset><legend>정기 지출 칸 (하루 여유에서 미리 빼 둘 돈)</legend><div class="chips">${BUCKETS.map(b=>`<button type="button" class="chip ${(s.regular||[]).includes(b)?'on':''}" data-reg="${esc(b)}">${esc(b)}</button>`).join('')}</div>
+      ${(s.regular||[]).filter(b=>BUCKETS.includes(b)).map(b=>`<div class="row small" style="margin-top:6px"><label for="dd_${esc(b)}" style="flex:1">${esc(b)} 납부일 (없으면 비워두기)</label><input id="dd_${esc(b)}" data-dd="${esc(b)}" class="in" style="width:60px;font-size:16px;text-align:right;padding:2px 6px" inputmode="numeric" value="${(s.dueDays||{})[b]||''}"></div>`).join('')}
+      <div class="tiny muted" style="margin-top:6px">정기 칸은 매달 이만큼은 나간다고 보고 미리 빼 둬요. 낼 때마다 기록하고, 예산보다 더 나가면 그만큼만 하루 여유에서 줄어요.</div></fieldset>
     <fieldset><legend>월급날 옮길 돈</legend>${state.plan.map((p,i)=>row(esc(accName(p.to)),'p'+i,p.amount)).join('')}
       <div class="row small" style="margin-top:8px"><select id="npTo" class="in" style="flex:1;padding:4px">${state.accounts.filter(a=>a.purpose!=='live'&&!state.plan.some(p=>p.to===a.id)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><button type="button" class="btn sm" id="npAdd">+ 추가</button></div></fieldset>
     <fieldset><legend>기타</legend>${row('비상금 목표','eg',s.emgGoal)}<div class="row small" style="margin-top:6px"><label for="pd" style="flex:1">월급일 (주말·공휴일이면 직전 영업일)</label><input id="pd" class="in pix" style="width:60px;font-size:20px;text-align:right;padding:2px 6px" inputmode="numeric" value="${s.payDay}"></div></fieldset>
@@ -591,10 +614,11 @@ function openSettings(){
   $('#npAdd').onclick=()=>{ const v=$('#npTo').value; if(!v) return; state.plan.push({id:uid(),to:v,amount:0}); persist(); openSettings(); };
   $('#bkCopy').onclick=async()=>{ try{ await navigator.clipboard.writeText(JSON.stringify(state)); toast('백업을 복사했어요'); }catch(e){ const t=$('#bkText'); t.hidden=false; t.value=JSON.stringify(state); t.select(); toast('복사가 막혀서 아래 텍스트를 직접 복사해 주세요'); } };
   $('#bkRestore').onclick=()=>{ const t=$('#bkText'); if(t.hidden||!t.value.trim()){ t.hidden=false; t.value=''; t.focus(); return; } try{ const o=JSON.parse(t.value); if(!o.accounts||!o.entries) throw 0; state=o; migrate(); persist(); closeDlg(); render(); toast('복원했어요'); }catch(e){ toast('백업 형식이 아니에요'); } };
+  document.querySelectorAll('[data-reg]').forEach(b=>b.onclick=()=>{ BUCKETS.forEach((x,i)=>s.budgets[x]=num('b'+i)); const k=b.dataset.reg; s.regular=s.regular||[]; s.regular=s.regular.includes(k)?s.regular.filter(x=>x!==k):[...s.regular,k]; persist(); openSettings(); });
   $('#lgOut').onclick=()=>{ closeDlg(); window.__logout(); };
   $('#sok').onclick=()=>{
     BUCKETS.forEach((b,i)=>s.budgets[b]=num('b'+i));
-    state.fixed.forEach((f,i)=>f.amount=num('f'+i));
+    s.dueDays={}; document.querySelectorAll('[data-dd]').forEach(i=>{ const v=+i.value.replace(/[^0-9]/g,''); if(v>=1&&v<=31) s.dueDays[i.dataset.dd]=v; });
     state.plan.forEach((p,i)=>p.amount=num('p'+i)); state.plan=state.plan.filter(p=>p.amount>0);
     s.emgGoal=num('eg'); s.payDay=Math.min(31,Math.max(1,num('pd')||25));
     persist(); closeDlg(); render(); toast('설정을 저장했어요');
@@ -644,7 +668,7 @@ async function init(){
       if(snap.exists()&&snap.data().accounts) state=snap.data();
       const mig=migrate();
       store={label:'☁ 내 계정에 저장됨', save:o=>{ try{localStorage.setItem(LS,JSON.stringify(o));}catch(e){} return setDoc(ref,o); }};
-      $('#status').textContent=store.label; render(); if(!snap.exists()||mig) persist(); if(mig) toast('예산 구조를 새로 맞췄어요 (교통비는 지출 칸으로)');
+      $('#status').textContent=store.label; render(); if(!snap.exists()||mig) persist(); if(mig) toast('고정지출 없이, 정기 지출 칸으로 정리했어요');
     }catch(e){ console.error(e); $('#status').textContent='불러오기 실패 — 인터넷 연결을 확인해 주세요'; }
   });
 }
