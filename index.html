@@ -164,7 +164,8 @@ const V2_BUDGETS = {'식비':400000,'생활비':100000,'경조사':100000,'문�
 const V2_SUBCATS = [['식사','식비'],['카페/간식','식비'],['배달','식비'],['장보기','식비'],['생필품','생활비'],['생활 기타','생활비'],['생일·선물','경조사'],['축의/부의','경조사'],['취미(기타·밴드)','문화생활'],['공연/영화','문화생활'],['놀거리','문화생활'],['옷','미용/의류'],['미용실','미용/의류'],['화장품','미용/의류'],['통신비','통신·보험·미정'],['보험','통신·보험·미정'],['미정','통신·보험·미정']];
 function migrate(){
   if(!state.settings) return;
-  if((state.v||1)<2){
+  const startV=state.v||1;
+  if(startV<2){
     const st=state.settings; st.budgets={...V2_BUDGETS}; st.bucketOrder=Object.keys(V2_BUDGETS);
     const rename={'장보기/생필품':'생필품','구독':'미정'};
     (state.entries||[]).forEach(e=>{ if(e.sub&&rename[e.sub]) e.sub=rename[e.sub]; });
@@ -179,6 +180,13 @@ function migrate(){
     const amt={'청약통장':250000,'생활파킹통장':500000,'ISA':300000,'연금저축':150000};
     (state.plan||[]).forEach(p=>{ const a=(state.accounts||[]).find(x=>x.id===p.to); if(a&&amt[a.name]!=null) p.amount=amt[a.name]; });
     state.v=2;
+  }
+  if(state.v===2){
+    const st=state.settings;
+    state.fixed=(state.fixed||[]).filter(f=>f.name!=='교통비');
+    if(!('교통' in st.budgets)){ st.budgets['교통']=100000; st.bucketOrder=(st.bucketOrder||Object.keys(st.budgets)).filter(b=>b!=='교통'); const i=st.bucketOrder.indexOf('생활비'); st.bucketOrder.splice(i>=0?i+1:st.bucketOrder.length,0,'교통'); }
+    ['교통 충전','택시'].forEach(n=>{ if(!state.subcats.some(c=>c.name===n)) state.subcats.push({name:n,bucket:'교통'}); });
+    state.v=3;
     return true;
   }
   return false;
@@ -383,6 +391,8 @@ const RULES = [
  ['배달',['배민','배달','쿠팡이츠','요기요','치킨','피자']],
  ['장보기',['마트','이마트','홈플러스','장보기','컬리','식재료','정육','과일']],
  ['생필품',['쿠팡','다이소','생필품','세제','휴지','샴푸','물티슈','치약','올리브영 생필']],
+ ['교통 충전',['교통','티머니','충전','지하철','버스','교통카드','기후동행']],
+ ['택시',['택시','카카오t','카카오택시','우티','타다']],
  ['통신비',['통신','핸드폰','휴대폰','요금','skt','kt','lg u+','유플러스','알뜰폰']],
  ['보험',['보험','실비']],
  ['취미(기타·밴드)',['합주','합주실','기타줄','줄','피크','이펙터','앰프','악기','스트링','레슨','카포']],
@@ -634,7 +644,7 @@ async function init(){
       if(snap.exists()&&snap.data().accounts) state=snap.data();
       const mig=migrate();
       store={label:'☁ 내 계정에 저장됨', save:o=>{ try{localStorage.setItem(LS,JSON.stringify(o));}catch(e){} return setDoc(ref,o); }};
-      $('#status').textContent=store.label; render(); if(!snap.exists()||mig) persist(); if(mig) toast('새 예산 구조(식비·생활비·경조사·문화생활·미용/의류·미정)로 바꿨어요');
+      $('#status').textContent=store.label; render(); if(!snap.exists()||mig) persist(); if(mig) toast('예산 구조를 새로 맞췄어요 (교통비는 지출 칸으로)');
     }catch(e){ console.error(e); $('#status').textContent='불러오기 실패 — 인터넷 연결을 확인해 주세요'; }
   });
 }
